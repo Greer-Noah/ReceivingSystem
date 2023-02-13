@@ -1,47 +1,41 @@
 import customtkinter
 import InterfaceCreation
-interfaceCreation = InterfaceCreation.InterfaceCreation(customtkinter.CTk, 800, 600)
-
 import os
 import pandas as pd
-import InterfaceCreation
+import xlsxwriter
 
 interface = InterfaceCreation.InterfaceCreation(customtkinter.CTk, 800, 650)
-# print(interface.store_list)
 
+try:
+    if InterfaceCreation.store_num is not None and InterfaceCreation.date is not None:
+        report_file_name = "Store{}Receiving_Report{}.xlsx".format(str(InterfaceCreation.store_num), str(InterfaceCreation.date))
+        date = InterfaceCreation.date
+        str(date)
+        date = date.replace(".", "")
+        folder_path = str(os.path.join(os.path.expanduser("~"), "Desktop/Receiving_Reports_{}".format(date)))
+        os.mkdir(folder_path)
+        path = os.path.join(os.path.expanduser("~"), "Desktop/Receiving_Reports_{}".format(date),
+                            report_file_name)
+        str(path)
 
-report_file_name = "WeeklyReport{0}.xlsx".format(interface.date_input)
-path = os.path.join(os.path.expanduser("~"), "Desktop/TrackingReports_{0}".format(interface.date_input),
-                    report_file_name)
-str(path)
+        global writer
+        writer = pd.ExcelWriter(path, engine='xlsxwriter', engine_kwargs={'options': {'strings_to_numbers': True}})
 
-global writer
-writer = pd.ExcelWriter(path, engine='xlsxwriter')
+        receiving_overview_sheet_name = "Store {} Receiving Overview".format(InterfaceCreation.store_num)
+        str(receiving_overview_sheet_name)
 
-combined_matching_sheet_name = "Combined Matching"
-str(combined_matching_sheet_name)
-interface.store_list[-1].get_combined().to_excel(writer, combined_matching_sheet_name, startrow=0, startcol=0, index=False)
+        print("Exporting Receiving Overview...")
+        InterfaceCreation.export_receiving_overview_xlsx().to_excel(writer, receiving_overview_sheet_name, startrow=0, startcol=0, index=False)
+        writer.save()
+    InterfaceCreation.conn.close()
+    if InterfaceCreation.conn:
+        InterfaceCreation.conn.close()
+        print("MySQL connection is closed.")
+except AttributeError as ae:
+    pass
+except Exception as e:
+    print("Something went wrong...")
+    print(":: ERROR :: {}".format(e))
 
-combined_repl_sheet_name = "REPL_NBR_Breakdown Total"
-str(combined_repl_sheet_name)
-interface.store_list[-1].get_combined_repl().to_excel(writer, combined_repl_sheet_name, startrow=0, startcol=0, index=False)
-
-for store in interface.store_list:
-    matching_sheet_name = "Matching {}".format(store.store_num)
-    str(matching_sheet_name)
-    total_items_sheet_name = "Total Items {}".format(store.store_num)
-    str(total_items_sheet_name)
-    expected_items_sheet_name = "Expected Items {}".format(store.store_num)
-    str(expected_items_sheet_name)
-    repl_group_nbr_sheet_name = "REPL Breakdown {}".format(store.store_num)
-    str(repl_group_nbr_sheet_name)
-
-    store.get_matching().to_excel(writer, matching_sheet_name, startrow=0, startcol=0, index=False)
-    store.get_total_items().to_excel(writer, total_items_sheet_name, startrow=0, startcol=0, index=False)
-    store.get_expected().to_excel(writer, expected_items_sheet_name, startrow=0, startcol=0, index=False)
-    store.get_repl_nbr().to_excel(writer, repl_group_nbr_sheet_name, startrow=0, startcol=0, index=False)
-
-
-writer.save()
-
-raise SystemExit(0)
+# raise SystemExit(0)
+exit(1)

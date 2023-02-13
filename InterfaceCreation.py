@@ -4,7 +4,9 @@ import customtkinter
 import os
 import mysql.connector
 import pandas as pd
+from pandas.io import sql as sql
 from pyxlsb import open_workbook as open_xlsb
+import openpyxl
 
 global store_num
 global date
@@ -12,11 +14,14 @@ global date
 global receiving_data_path
 global new_epcs_path
 global qb_master_path
-global total_items_path
 global item_file_path
 
+global app
 global conn
 global cursor
+
+global rec_over_list
+rec_over_list = []
 
 
 def import_receiving_data():
@@ -49,16 +54,6 @@ def import_qb_master_items():
     print(qb_master_path)
 
 
-def import_total_items():
-    print("Total Items...")
-    pop_up_title = "Select Total Items (.xlsx)"
-    filename = filedialog.askopenfilename(initialdir="/", title=pop_up_title,
-                                          filetypes=(("xlsx files", "*.xlsx"), ("all files", "*.*")))
-    global total_items_path
-    total_items_path = filename
-    print(total_items_path)
-
-
 def import_item_file():
     print("Item File...")
     pop_up_title = "Select Item File (GM) (.csv)"
@@ -79,50 +74,13 @@ def open_settings():
 
 def quit_app():
     print("Quit...")
-    exit(1)
+    app.quit()
 
 
 def submit_info():
     return_value = True
-    '''
-    if store_number_verification() and date_verification():
-        print("Store Number and Date input accepted...")
-    else:
-        print("Store Number or Date input(s) are invalid!")
-        return_value = False
-
-    if receiving_path_verification():
-        print("Valid Receiving Data input...")
-    else:
-        print("Receiving Data input is invalid or unspecified!")
-        return_value = False
-
-    if new_epcs_path_verification():
-        print("Valid New EPCs file input...")
-    else:
-        print("New EPCs file input is invalid or unspecified!")
-        return_value = False
-
-    if qb_path_verification():
-        print("Valid QB Master Items file input...")
-    else:
-        print("QB Master Items file input is invalid or unspecified!")
-        return_value = False
-
-    if total_items_path_verification():
-        print("Valid Total Items file input...")
-    else:
-        print("Total Items file input is invalid or unspecified!")
-        return_value = False
-
-    if item_file_path_verification():
-        print("Valid Item File input...")
-    else:
-        print("Item File input is invalid or unspecified!")
-        return_value = False
-    '''
     for func in [store_number_verification, date_verification, receiving_path_verification, new_epcs_path_verification,
-                 qb_path_verification, total_items_path_verification, item_file_path_verification]:
+                 qb_path_verification, item_file_path_verification]:
         if not func():
             print(f"{func.__name__} input is invalid or unspecified!")
             return_value = False
@@ -164,14 +122,129 @@ def import_receiving_sql():
         cursor.execute(stmt)
         print(" -- Receiving Data import complete.")
     except Exception as e:
-        print(":: ERROR:: Could not import Receiving Data!")
+        print(":: ERROR :: Could not import Receiving Data!")
         print(e)
 
 
 def import_new_epcs_sql():
-    stmt = "DROP TABLE IF EXISTS NewEPCs"
-    cursor.execute(stmt)
-    pass
+    try:
+        stmt = "DROP TABLE IF EXISTS NewEPCs"
+        cursor.execute(stmt)
+        '''
+            * Import Active EPC Directory file.
+            * Select 2nd sheet in workbook
+            * Import entire New EPC Directory sheet to SQL
+            * Filter sheet once in SQL to New EPCs only
+        '''
+        df = []
+        print(" -- Converting New EPCs to .csv")
+        # df = pd.DataFrame(pd.read_excel(new_epcs_path))
+        read_file = pd.read_excel(new_epcs_path, sheet_name=1)
+        # df = pd.DataFrame(df[1:], columns=df[0])
+
+        new_epcs_csv_path = os.path.splitext(new_epcs_path)[0]
+        new_epcs_csv_path += ".csv"
+        count = 1
+        while os.path.exists(new_epcs_csv_path):
+            new_epcs_csv_path = os.path.splitext(new_epcs_path)[0] + " (" + str(count) + ")" + ".csv"
+            count += 1
+
+        read_file.to_csv(new_epcs_csv_path, index=False)
+        df = pd.DataFrame(pd.read_csv(new_epcs_csv_path))
+        # df.to_csv(new_epcs_csv_path, index=False)  # to generate a .csv file
+
+        with open(new_epcs_csv_path, "rb") as file:
+            lines = file.readlines()
+
+        with open(new_epcs_csv_path, "wb") as file:
+            for line in lines:
+                file.write(line.replace(b"\r\n", b"\n"))
+        print(" -- New EPCs file conversion to .csv complete.")
+
+        statement_headers = "CREATE TABLE NewEPCs(EPC text, UPC text, Latest_Date_Seen text, Status text)"
+        cursor.execute(statement_headers)
+
+        new_epcs_corrected = new_epcs_csv_path.replace(" ", "\\ ")
+
+        stmt1 = "LOAD DATA LOCAL INFILE \'{}\' " \
+                "INTO TABLE NewEPCs " \
+                "CHARACTER SET latin1 " \
+                "FIELDS TERMINATED BY \',\'" \
+                "OPTIONALLY ENCLOSED BY \'\"\' " \
+                "LINES TERMINATED BY \'\\n\' " \
+                "IGNORE 1 ROWS;".format(new_epcs_corrected)
+
+        print(" -- Starting New EPCs import...")
+        cursor.execute(stmt1)
+        print(" -- New EPCs import complete.")
+        stmt1 = "CREATE TABLE temp AS " \
+                "SELECT * " \
+                "FROM newepcs " \
+                "WHERE newepcs.Status = \"New\";"
+        cursor.execute(stmt1)
+        stmt2 = "DROP TABLE IF EXISTS NewEPCs;"
+        cursor.execute(stmt2)
+        stmt3 = "CREATE TABLE NewEPCs AS " \
+                "SELECT * FROM temp;"
+        cursor.execute(stmt3)
+        cursor.execute("DROP TABLE IF EXISTS temp")
+
+        conn.commit()
+
+    except Exception as e:
+        print(":: ERROR :: Could not import New EPCs file!")
+        print(e)
+
+
+def import_active_epcs_sql():
+    try:
+        stmt = "DROP TABLE IF EXISTS ActiveEPCs"
+        cursor.execute(stmt)
+
+        df = []
+        print(" -- Converting Active EPCs to .csv")
+        read_file = pd.read_excel(new_epcs_path, sheet_name=0)
+
+        active_epcs_csv_path = os.path.splitext(new_epcs_path)[0]
+        active_epcs_csv_path += "_Active.csv"
+        count = 1
+
+        while os.path.exists(active_epcs_csv_path):
+            active_epcs_csv_path = os.path.splitext(new_epcs_path)[0] + "_Active (" + str(count) + ")" + ".csv"
+            count += 1
+
+        read_file.to_csv(active_epcs_csv_path, index=False)
+        df = pd.DataFrame(pd.read_csv(active_epcs_csv_path))
+
+        with open(active_epcs_csv_path, "rb") as file:
+            lines = file.readlines()
+
+        with open(active_epcs_csv_path, "wb") as file:
+            for line in lines:
+                file.write(line.replace(b"\r\n", b"\n"))
+        print(" -- Active EPCs file conversion to .csv complete.")
+
+        statement_headers = "CREATE TABLE ActiveEPCs(EPC text, UPC text, Latest_Date_Seen text)"
+        cursor.execute(statement_headers)
+
+        active_epcs_corrected = active_epcs_csv_path.replace(" ", "\\ ")
+
+        stmt1 = "LOAD DATA LOCAL INFILE \'{}\' " \
+                "INTO TABLE ActiveEPCs " \
+                "CHARACTER SET latin1 " \
+                "FIELDS TERMINATED BY \',\'" \
+                "OPTIONALLY ENCLOSED BY \'\"\' " \
+                "LINES TERMINATED BY \'\\n\' " \
+                "IGNORE 1 ROWS;".format(active_epcs_corrected)
+
+        print(" -- Starting Active EPCs import...")
+        cursor.execute(stmt1)
+        print(" -- Active EPCs import complete.")
+        conn.commit()
+
+    except Exception as e:
+        print(":: ERROR :: Could not import Active EPCs file!")
+        print(e)
 
 
 def import_qb_sql():
@@ -208,7 +281,7 @@ def import_qb_sql():
         print(" -- QB Master Items file conversion to .csv complete.")
 
         statement_headers = "CREATE TABLE QBMasterItems(Record_ID_NBR text, Items_Record_ID_NBRs text, Item_Validation_Status text, " \
-                            "Item_Arrival_Status text, Vendor_Number text, Vendor_Name text, Dept_NBR text, UPC text, " \
+                            "Item_Arrival_Status text, Vendor_Number text, Vendor_Name text, Dept_NBR text, SBU text, UPC text, " \
                             "Item_Description text, Arrival_Month text, Max_Shipped_On_Date text, Offshore text)"
         cursor.execute(statement_headers)
 
@@ -224,6 +297,7 @@ def import_qb_sql():
 
         print(" -- Starting QB Master Items import...")
         cursor.execute(stmt1)
+        cursor.execute("UPDATE qbmasteritems SET UPC = REPLACE(UPC, \".0\", \"\");")  # Removes '.0' from end of UPC.
         print(" -- QB Master Items import complete.")
         conn.commit()
 
@@ -259,6 +333,122 @@ def import_item_file_sql():
     conn.commit()
 
 
+def create_upc_drop_sql():
+    print(" -- Creating UPC Drop table...")
+    stmt = "DROP TABLE IF EXISTS UPCDrop"
+    cursor.execute(stmt)
+    stmt1 = "CREATE TABLE UPCDrop AS " \
+            "SELECT activeepcs.UPC " \
+            "FROM activeepcs " \
+            "WHERE activeepcs.Latest_Date_Seen = (SELECT MAX(activeepcs.Latest_Date_Seen) FROM activeepcs);"
+    cursor.execute(stmt1)
+    conn.commit()
+    print(" -- UPC Drop table creation complete.")
+
+
+def create_total_items_sql():
+    print(" -- Creating Total Items Table...")
+    stmt = "DROP TABLE IF EXISTS TotalItems"
+    cursor.execute(stmt)
+    stmt1 = "CREATE TABLE TotalItems AS " \
+            "SELECT itemfile.gtin, " \
+            "itemfile.DEPT_CATG_GRP_DESC, " \
+            "itemfile.DEPT_CATEGORY_DESC, " \
+            "itemfile.VENDOR_NBR, " \
+            "itemfile.VENDOR_NAME, " \
+            "itemfile.BRAND_FAMILY_NAME, " \
+            "itemfile.dept_nbr " \
+            "FROM itemfile " \
+            "INNER JOIN UPCDrop ON UPCDrop.UPC = itemfile.gtin " \
+            "WHERE UPCDrop.UPC = itemfile.gtin"
+    cursor.execute(stmt1)
+    conn.commit()
+    print(" -- Total Items Table creation complete.")
+
+
+def create_transactions_gm_sql():
+    print(" -- Creating Transactions (GM) table...")
+    stmt = "DROP TABLE IF EXISTS transactions_gm;"
+    cursor.execute(stmt)
+    stmt1 = "CREATE TABLE transactions_gm AS " \
+            "SELECT * FROM receivingdata " \
+            "WHERE dept_nbr IN ('7','9','14','17','20','22','71','72','74','87') " \
+            "ORDER BY receivingdata.Event_Timestamp DESC;"
+    cursor.execute(stmt1)
+    print(" -- Transactions table creation complete.")
+
+
+def create_receiving_gm_sql():
+    print(" -- Creating Receiving (GM) table...")
+    stmt = "DROP TABLE IF EXISTS receiving_gm;"
+    cursor.execute(stmt)
+    stmt1 = "CREATE TABLE receiving_gm AS " \
+            "SELECT * FROM transactions_gm " \
+            "WHERE Transaction_Type = \"Receiving\" " \
+            "ORDER BY Event_Timestamp DESC;"
+    cursor.execute(stmt1)
+    print(" -- Receiving (GM) table creation complete.")
+
+
+def create_upc_no_check_sql():
+    cursor.execute("DROP TABLE IF EXISTS UPC_No_Check_Digit;")
+    stmt = "CREATE TABLE UPC_No_Check_Digit AS " \
+           "SELECT Receiving_GM.eGTIN, LEFT(Receiving_GM.eGTIN, LENGTH(Receiving_GM.eGTIN) - 1) " \
+           "AS UPC_No_Check FROM Receiving_GM;"
+    cursor.execute(stmt)
+
+
+def create_receiving_overview_sql():
+    cursor.execute("DROP TABLE IF EXISTS Receiving_Overview;")
+    stmt1 = """
+    CREATE TABLE Receiving_Overview AS SELECT
+    COALESCE(ItemFile.Vendor_NBR, 'Not Found in Item File') AS Vendor_NBR,
+    Receiving_GM.eGTIN,
+    COALESCE(TotalItemsCount.Total_RFID, 0) AS Total_RFID,
+    COALESCE(ItemFile.ei_onhand_qty, 'Not Found in Item File') AS ei_onhand_qty,
+    COALESCE(Receiving_GM_Sum.Receiving_Total, 0) AS Receiving_Total,
+    COALESCE(Transactions_GM_Sum.Sum_Transactions_Total, 0) AS Sum_Transactions_Total,
+    COALESCE(New_EPCs_Count.New_EPC_Total, 0) AS New_EPC_Total,
+    CASE
+    WHEN COALESCE(Transactions_GM_Sum.Sum_Transactions_Total, 0) = COALESCE(New_EPCs_Count.New_EPC_Total, 0) THEN 'Match'
+    WHEN COALESCE(Transactions_GM_Sum.Sum_Transactions_Total, 0) > COALESCE(New_EPCs_Count.New_EPC_Total, 0) THEN 'Under'
+    ELSE 'Over'
+    END AS Matches,
+    COALESCE(Agg_Qty, 0) AS Aggregate_Qty,
+    COALESCE(ItemFile.dept_catg_grp_desc, 'Not Found in Item File') AS dept_catg_grp_desc,
+    COALESCE(ItemFile.dept_category_desc, 'Not Found in Item File') AS dept_category_desc,
+    COALESCE(ItemFile.vendor_name, 'Not Found in Item File') AS Vendor_Name,
+    COALESCE(ItemFile.brand_family_name, 'Not Found in Item File') AS Brand_Family_Name,
+    COALESCE(ItemFile.dept_nbr, 'Not Found in Item File') AS Dept_NBR,
+    COALESCE(ItemFile.repl_group_nbr, 'Not Found in Item File') AS REPL_Group_NBR,
+    COALESCE(No_Check, 'Error') AS UPC_No_Check,
+    CASE
+    WHEN qbmasteritems.UPC = No_Check_Results.No_Check THEN 'Found'
+    ELSE 'Not Found in QB'
+    END AS Found_In_QB,
+    COALESCE(qbmasteritems.Item_Validation_Status, 'Not Found in QB') AS Item_Validation_Status
+    FROM
+    (SELECT eGTIN FROM Receiving_GM GROUP BY eGTIN) AS Receiving_GM
+    LEFT JOIN ItemFile ON Receiving_GM.eGTIN = ItemFile.gtin
+    LEFT JOIN (SELECT gtin, COUNT(*) AS Total_RFID FROM TotalItems GROUP BY gtin) AS TotalItemsCount ON TotalItemsCount.gtin = Receiving_GM.eGTIN
+    LEFT JOIN (SELECT eGTIN, SUM(Transaction_QTY) AS Receiving_Total FROM receiving_gm GROUP BY eGTIN) AS Receiving_GM_Sum ON Receiving_GM_Sum.eGTIN = Receiving_GM.eGTIN
+    LEFT JOIN (SELECT eGTIN, SUM(Transaction_QTY) AS Sum_Transactions_Total FROM transactions_gm GROUP BY eGTIN) AS Transactions_GM_Sum ON Transactions_GM_Sum.eGTIN = Receiving_GM.eGTIN
+    LEFT JOIN (SELECT UPC, COUNT(*) AS New_EPC_Total FROM newepcs GROUP BY UPC) AS New_EPCs_Count ON New_EPCs_Count.UPC = Receiving_GM.eGTIN
+    LEFT JOIN (SELECT eGTIN, MAX(Aggregate_Qty) AS Agg_Qty FROM Receiving_GM GROUP BY eGTIN) AS Aggregate_Qty_Results ON Aggregate_Qty_Results.eGTIN = Receiving_GM.eGTIN
+    LEFT JOIN (SELECT DISTINCT eGTIN AS eGTIN, UPC_No_Check AS No_Check FROM UPC_No_Check_Digit) AS No_Check_Results ON No_Check_Results.eGTIN = receiving_gm.eGTIN
+    LEFT JOIN qbmasteritems ON No_Check_Results.No_Check = qbmasteritems.UPC;
+    """
+    cursor.execute(stmt1)
+    conn.commit()
+
+
+def export_receiving_overview_xlsx():
+    print("Gathering Receiving Overview table for export...")
+    rec_over = sql.read_sql('SELECT * FROM receivingsystem.receiving_overview', conn)
+    conn.close()
+    return rec_over
+
+
 def generate_report():
     try:
         if submit_info():
@@ -266,15 +456,18 @@ def generate_report():
             connect_to_mysql()
             import_receiving_sql()
             import_new_epcs_sql()
+            import_active_epcs_sql()
             import_qb_sql()
             import_item_file_sql()
-            print("Report Generated.")
-            conn.close()
-            if conn:
-                conn.close()
-                print("MySQL connection is closed.")
-            print("Quitting Application...")
-            exit(1)
+            create_upc_drop_sql()
+            create_total_items_sql()
+            create_transactions_gm_sql()
+            create_receiving_gm_sql()
+            create_upc_no_check_sql()
+            create_receiving_overview_sql()
+            print("Report Generated for Store {}.".format(store_num))
+            # print("Quitting Application...")
+            # app.quit()
         else:
             print("\n------------------------------------------------------------------------"
                   "\n:: ERROR :: Invalid inputs! Please enter valid inputs before submitting!"
@@ -352,18 +545,6 @@ def qb_path_verification():
         return False
 
 
-def total_items_path_verification():
-    global total_items_path
-    try:
-        if total_items_path == "":
-            return False
-        else:
-            return True
-    except:
-        print(":: ERROR :: Total Items file path has not been specified!")
-        return False
-
-
 def item_file_path_verification():
     global item_file_path
     try:
@@ -389,7 +570,7 @@ class InterfaceCreation:
 
     customtkinter.set_appearance_mode("Dark")
     customtkinter.set_default_color_theme("dark-blue")
-
+    global app
     app = customtkinter.CTk()
     app.title("Receiving Report System")
     app.geometry("800x600")
@@ -412,7 +593,7 @@ class InterfaceCreation:
     left_frame.pack(side=LEFT, fill="both", expand=True)
     right_frame.pack(side=RIGHT, fill="both", expand=True)
 
-    file_name_text_box = customtkinter.CTkTextbox(master=bottom_frame)
+    # file_name_text_box = customtkinter.CTkTextbox(master=bottom_frame)
 
     '''
     Store and Date Entry Creation
@@ -434,8 +615,6 @@ class InterfaceCreation:
     new_epc_button = customtkinter.CTkButton(master=left_frame, text="New EPCs (.xlsx)", command=import_new_epcs)
     qb_master_items_button = customtkinter.CTkButton(master=left_frame, text="QB Master Items (.xlsb)",
                                                      command=import_qb_master_items)
-    total_items_button = customtkinter.CTkButton(master=right_frame, text="Total Items (.xlsx)",
-                                                 command=import_total_items)
     item_file_button = customtkinter.CTkButton(master=right_frame, text="Item File (.csv)", command=import_item_file)
     settings_button = customtkinter.CTkButton(master=top_frame, text="Settings", width=75, height=30,
                                               command=open_settings)
@@ -445,7 +624,6 @@ class InterfaceCreation:
     receiving_data_button.pack(pady=5)
     new_epc_button.pack(pady=5)
     qb_master_items_button.pack(pady=5)
-    total_items_button.pack(pady=5)
     item_file_button.pack(pady=5)
     settings_button.pack(anchor=NE, padx=15, pady=10)
     quit_button.pack(anchor=NE, padx=15, pady=0)
